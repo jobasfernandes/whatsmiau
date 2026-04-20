@@ -30,6 +30,12 @@ type emitter struct {
 	data any
 }
 
+const (
+	messagePicCacheTTL      = 6 * time.Hour
+	messageEmptyPicCacheTTL = 30 * time.Minute
+	messagePicInfoTimeout   = 5 * time.Second
+)
+
 func (s *Whatsmiau) getInstance(id string) *models.Instance {
 	ctx, c := context.WithTimeout(context.Background(), time.Second*5)
 	defer c()
@@ -421,6 +427,8 @@ func (s *Whatsmiau) handleContactEvent(id string, instance *models.Instance, e *
 }
 
 func (s *Whatsmiau) handlePictureEvent(id string, instance *models.Instance, e *events.Picture, eventMap map[string]bool) {
+	s.invalidateProfilePicCache(e.JID)
+
 	if !eventMap["CONTACTS_UPSERT"] {
 		return
 	}
@@ -907,9 +915,21 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 		}
 	}
 
+	var profilePicURL, pictureID string
+	if instance.Webhook.IncludeProfilePicOnMessage == nil || *instance.Webhook.IncludeProfilePicOnMessage {
+		senderJIDForPic := evt.Info.Sender
+		if senderJIDForPic.IsEmpty() {
+			senderJIDForPic = evt.Info.Chat
+		}
+
+		profilePicURL, pictureID = s.enrichWithProfilePic(ctx, id, senderJIDForPic)
+	}
+
 	return &WookMessageData{
 		Key:              key,
 		PushName:         strings.TrimSpace(e.Info.PushName),
+		ProfilePicUrl:    profilePicURL,
+		PictureID:        pictureID,
 		Status:           status,
 		Message:          raw,
 		ContextInfo:      &messageContext,
@@ -1128,6 +1148,8 @@ func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContac
 }
 
 func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact {
+	s.invalidateProfilePicCache(evt.JID)
+
 	url, b64Pic, err := s.getPic(id, evt.JID)
 	if err != nil {
 		zap.L().Error("failed to get pic", zap.Error(err))
@@ -1153,6 +1175,88 @@ func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact 
 		ProfilePicUrl: url,
 		RemoteLid:     lid,
 	}
+}
+
+func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid types.JID) (string, string) {
+	jid = jid.ToNonAD()
+	if jid.IsEmpty() {
+		return "", ""
+	}
+
+	client, ok := s.clients.Load(id)
+	if !ok || client == nil {
+		zap.L().Warn("no client for profile pic enrichment", zap.String("id", id))
+		return "", ""
+	}
+
+	userInfoCtx, cancel := context.WithTimeout(ctx, messagePicInfoTimeout)
+	defer cancel()
+
+	userInfoByJID, err := client.GetUserInfo(userInfoCtx, []types.JID{jid})
+	if err != nil {
+		zap.L().Warn("failed to get user info for profile pic enrichment", zap.String("id", id), zap.String("jid", jid.String()), zap.Error(err))
+		return "", ""
+	}
+
+	userInfo, ok := userInfoByJID[jid]
+	if !ok {
+		return "", ""
+	}
+
+	pictureID := userInfo.PictureID
+	cacheKey := jid.String()
+
+	if cachedAny, ok := s.picCache.Load(cacheKey); ok {
+		if cached, castOK := cachedAny.(picCacheEntry); castOK {
+			ttl := messagePicCacheTTL
+			if cached.URL == "" {
+				ttl = messageEmptyPicCacheTTL
+			}
+
+			if cached.PictureID == pictureID && time.Since(cached.FetchedAt) < ttl {
+				return cached.URL, pictureID
+			}
+		}
+	}
+
+	if pictureID == "" {
+		s.picCache.Store(cacheKey, picCacheEntry{
+			PictureID: pictureID,
+			URL:       "",
+			FetchedAt: time.Now(),
+		})
+		return "", ""
+	}
+
+	url, b64Pic, err := s.getPic(id, jid)
+	if err != nil {
+		zap.L().Warn("failed to get profile pic on message enrichment", zap.String("id", id), zap.String("jid", jid.String()), zap.Error(err))
+	}
+
+	if b64Pic != "" {
+		picURL, uploadErr := s.uploadPic(ctx, cacheKey, b64Pic)
+		if uploadErr != nil {
+			zap.L().Warn("failed to upload profile pic on message enrichment", zap.String("id", id), zap.String("jid", jid.String()), zap.Error(uploadErr))
+		} else if picURL != "" {
+			url = picURL
+		}
+	}
+
+	s.picCache.Store(cacheKey, picCacheEntry{
+		PictureID: pictureID,
+		URL:       url,
+		FetchedAt: time.Now(),
+	})
+
+	return url, pictureID
+}
+
+func (s *Whatsmiau) invalidateProfilePicCache(jid types.JID) {
+	if jid.IsEmpty() {
+		return
+	}
+
+	s.picCache.Delete(jid.ToNonAD().String())
 }
 
 func (s *Whatsmiau) convertBusinessName(id string, evt *events.BusinessName) *WookContact {
