@@ -929,7 +929,7 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 		Key:              key,
 		PushName:         strings.TrimSpace(e.Info.PushName),
 		ProfilePicUrl:    profilePicURL,
-		PictureId:        pictureID,
+		PictureID:        pictureID,
 		Status:           status,
 		Message:          raw,
 		ContextInfo:      &messageContext,
@@ -1213,7 +1213,7 @@ func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid typ
 				ttl = messageEmptyPicCacheTTL
 			}
 
-			if cached.PictureID == pictureID && time.Since(cached.FetchedAt) <= ttl {
+			if cached.PictureID == pictureID && time.Since(cached.FetchedAt) < ttl {
 				return cached.URL, pictureID
 			}
 		}

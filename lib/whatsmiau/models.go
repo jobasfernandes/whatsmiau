@@ -31,7 +31,7 @@ type WookMessageData struct {
 	Key              *WookKey                `json:"key,omitempty"`
 	PushName         string                  `json:"pushName,omitempty"`
 	ProfilePicUrl    string                  `json:"profilePicUrl,omitempty"`
-	PictureId        string                  `json:"pictureId,omitempty"`
+	PictureID        string                  `json:"pictureId,omitempty"`
 	Status           string                  `json:"status,omitempty"`
 	Message          *WookMessageRaw         `json:"message,omitempty"`
 	ContextInfo      *WookMessageContextInfo `json:"contextInfo,omitempty"`
