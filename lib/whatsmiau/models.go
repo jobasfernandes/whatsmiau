@@ -13,7 +13,7 @@ const (
 	WookMessagesUpdate   Wook = "messages.update"
 	WookContactsUpsert   Wook = "contacts.upsert"
 	WookConnectionUpdate Wook = "connection.update"
-  WookMessagesDelete  Wook = "messages.delete"
+	WookMessagesDelete   Wook = "messages.delete"
 )
 
 type WookEvent[data any] struct {
@@ -30,6 +30,8 @@ type WookEvent[data any] struct {
 type WookMessageData struct {
 	Key              *WookKey                `json:"key,omitempty"`
 	PushName         string                  `json:"pushName,omitempty"`
+	ProfilePicUrl    string                  `json:"profilePicUrl,omitempty"`
+	PictureId        string                  `json:"pictureId,omitempty"`
 	Status           string                  `json:"status,omitempty"`
 	Message          *WookMessageRaw         `json:"message,omitempty"`
 	ContextInfo      *WookMessageContextInfo `json:"contextInfo,omitempty"`

@@ -35,6 +35,7 @@ type Whatsmiau struct {
 	httpClient       *http.Client
 	fileStorage      interfaces.Storage
 	handlerSemaphore chan struct{}
+	picCache         sync.Map
 }
 
 var instance *Whatsmiau

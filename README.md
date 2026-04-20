@@ -173,6 +173,35 @@ The application can send webhook events for the following actions:
 | `MESSAGES_DELETE` | Triggered when a message is deleted for everyone.   |
 | `CONTACTS_UPSERT` | Triggered when a contact is created or updated.     |
 
+### `MESSAGES_UPSERT` profile picture enrichment
+
+`MESSAGES_UPSERT` now includes the sender profile picture metadata when available:
+
+- `profilePicUrl`: uploaded URL of the participant profile picture.
+- `pictureId`: WhatsApp picture identifier (`types.UserInfo.PictureID`) that changes when the contact changes their photo.
+
+To avoid expensive picture fetches on every message, WhatsMiau uses an in-memory cache keyed by participant JID:
+
+- `pictureId` unchanged + cache still valid: reuse cached `profilePicUrl`.
+- cache miss / changed `pictureId` / expired TTL: refresh picture and update cache.
+- no picture available: cache empty entry with shorter TTL.
+
+Default TTLs:
+- 6 hours for entries with picture URL.
+- 30 minutes for empty entries.
+
+You can disable this enrichment per instance webhook config with:
+
+```json
+{
+  "webhook": {
+    "includeProfilePicOnMessage": false
+  }
+}
+```
+
+When omitted, `includeProfilePicOnMessage` defaults to `true`.
+
 
 ## Contributors
 

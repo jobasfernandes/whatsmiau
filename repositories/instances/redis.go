@@ -82,6 +82,9 @@ func (s *RedisInstance) Update(ctx context.Context, id string, toUpdate *models.
 	if toUpdate.Webhook.Base64 != nil {
 		oldInstance.Webhook.Base64 = toUpdate.Webhook.Base64
 	}
+	if toUpdate.Webhook.IncludeProfilePicOnMessage != nil {
+		oldInstance.Webhook.IncludeProfilePicOnMessage = toUpdate.Webhook.IncludeProfilePicOnMessage
+	}
 	if toUpdate.Webhook.Headers != nil {
 		if oldInstance.Webhook.Headers == nil {
 			oldInstance.Webhook.Headers = map[string]string{}

@@ -30,6 +30,17 @@ type emitter struct {
 	data any
 }
 
+type picCacheEntry struct {
+	pictureID string
+	url       string
+	fetchedAt time.Time
+}
+
+const (
+	picCacheTTL      = 6 * time.Hour
+	picEmptyCacheTTL = 30 * time.Minute
+)
+
 func (s *Whatsmiau) getInstance(id string) *models.Instance {
 	ctx, c := context.WithTimeout(context.Background(), time.Second*5)
 	defer c()
@@ -421,6 +432,8 @@ func (s *Whatsmiau) handleContactEvent(id string, instance *models.Instance, e *
 }
 
 func (s *Whatsmiau) handlePictureEvent(id string, instance *models.Instance, e *events.Picture, eventMap map[string]bool) {
+	s.invalidateProfilePicCache(e.JID)
+
 	if !eventMap["CONTACTS_UPSERT"] {
 		return
 	}
@@ -907,9 +920,21 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 		}
 	}
 
+	var profilePicURL string
+	var pictureID string
+	if s.shouldIncludeProfilePicOnMessage(instance) {
+		enrichJID := e.Info.Sender.ToNonAD()
+		if parsedSenderJID, err := types.ParseJID(senderJid); err == nil {
+			enrichJID = parsedSenderJID.ToNonAD()
+		}
+		profilePicURL, pictureID = s.enrichWithProfilePic(ctx, id, enrichJID)
+	}
+
 	return &WookMessageData{
 		Key:              key,
 		PushName:         strings.TrimSpace(e.Info.PushName),
+		ProfilePicUrl:    profilePicURL,
+		PictureId:        pictureID,
 		Status:           status,
 		Message:          raw,
 		ContextInfo:      &messageContext,
@@ -918,6 +943,96 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 		InstanceId:       id,
 		Source:           "whatsapp",
 	}
+}
+
+func (s *Whatsmiau) shouldIncludeProfilePicOnMessage(instance *models.Instance) bool {
+	if instance == nil || instance.Webhook.IncludeProfilePicOnMessage == nil {
+		return true
+	}
+
+	return *instance.Webhook.IncludeProfilePicOnMessage
+}
+
+func (s *Whatsmiau) invalidateProfilePicCache(jid types.JID) {
+	s.picCache.Delete(jid.ToNonAD().String())
+}
+
+func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid types.JID) (string, string) {
+	if jid.IsEmpty() {
+		return "", ""
+	}
+
+	if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer {
+		return "", ""
+	}
+
+	client, ok := s.clients.Load(id)
+	if !ok || client == nil {
+		return "", ""
+	}
+
+	cacheKey := jid.ToNonAD().String()
+	infoCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	userInfoMap, err := client.GetUserInfo(infoCtx, []types.JID{jid})
+	if err != nil {
+		zap.L().Warn("failed to get user info for picture enrichment", zap.String("instance", id), zap.String("jid", cacheKey), zap.Error(err))
+		return "", ""
+	}
+
+	userInfo, ok := userInfoMap[jid]
+	if !ok {
+		return "", ""
+	}
+
+	now := time.Now()
+	pictureID := strings.TrimSpace(userInfo.PictureID)
+	if entryRaw, ok := s.picCache.Load(cacheKey); ok {
+		if entry, ok := entryRaw.(picCacheEntry); ok && entry.pictureID == pictureID && !isPicCacheExpired(entry, now) {
+			return entry.url, pictureID
+		}
+	}
+
+	if pictureID == "" {
+		s.picCache.Store(cacheKey, picCacheEntry{
+			pictureID: "",
+			url:       "",
+			fetchedAt: now,
+		})
+		return "", ""
+	}
+
+	url, b64Pic, err := s.getPic(id, jid)
+	if err != nil {
+		zap.L().Warn("failed to refresh profile picture", zap.String("instance", id), zap.String("jid", cacheKey), zap.Error(err))
+	}
+
+	if b64Pic != "" {
+		picURL, uploadErr := s.uploadPic(context.Background(), cacheKey, b64Pic)
+		if uploadErr != nil {
+			zap.L().Warn("failed to upload refreshed profile picture", zap.String("instance", id), zap.String("jid", cacheKey), zap.Error(uploadErr))
+		} else if picURL != "" {
+			url = picURL
+		}
+	}
+
+	s.picCache.Store(cacheKey, picCacheEntry{
+		pictureID: pictureID,
+		url:       url,
+		fetchedAt: now,
+	})
+
+	return url, pictureID
+}
+
+func isPicCacheExpired(entry picCacheEntry, now time.Time) bool {
+	ttl := picCacheTTL
+	if entry.url == "" {
+		ttl = picEmptyCacheTTL
+	}
+
+	return now.Sub(entry.fetchedAt) > ttl
 }
 
 func (s *Whatsmiau) convertEventReceipt(id string, evt *events.Receipt) []WookMessageUpdateData {
@@ -1128,6 +1243,8 @@ func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContac
 }
 
 func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact {
+	s.invalidateProfilePicCache(evt.JID)
+
 	url, b64Pic, err := s.getPic(id, evt.JID)
 	if err != nil {
 		zap.L().Error("failed to get pic", zap.Error(err))
