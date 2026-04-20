@@ -37,8 +37,11 @@ type picCacheEntry struct {
 }
 
 const (
-	picCacheTTL           = 6 * time.Hour
-	picEmptyCacheTTL      = 30 * time.Minute
+	// picCacheTTL is used for cached entries that already have a profile picture URL.
+	picCacheTTL = 6 * time.Hour
+	// picEmptyCacheTTL is used for contacts without a profile picture URL.
+	picEmptyCacheTTL = 30 * time.Minute
+	// profilePicInfoTimeout bounds GetUserInfo latency during message enrichment.
 	profilePicInfoTimeout = 5 * time.Second
 )
 
@@ -1010,7 +1013,7 @@ func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid typ
 	}
 
 	if b64Pic != "" {
-		picURL, uploadErr := s.uploadPic(context.Background(), cacheKey, b64Pic)
+		picURL, uploadErr := s.uploadPic(ctx, cacheKey, b64Pic)
 		if uploadErr != nil {
 			zap.L().Warn("failed to upload refreshed profile picture", zap.String("instance", id), zap.String("jid", cacheKey), zap.Error(uploadErr))
 		} else if picURL != "" {
