@@ -427,7 +427,7 @@ func (s *Whatsmiau) handleContactEvent(id string, instance *models.Instance, e *
 }
 
 func (s *Whatsmiau) handlePictureEvent(id string, instance *models.Instance, e *events.Picture, eventMap map[string]bool) {
-	s.invalidatePicCache(e.JID)
+	s.invalidateProfilePicCache(e.JID)
 
 	if !eventMap["CONTACTS_UPSERT"] {
 		return
@@ -1148,7 +1148,7 @@ func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContac
 }
 
 func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact {
-	s.invalidatePicCache(evt.JID)
+	s.invalidateProfilePicCache(evt.JID)
 
 	url, b64Pic, err := s.getPic(id, evt.JID)
 	if err != nil {
@@ -1189,10 +1189,10 @@ func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid typ
 		return "", ""
 	}
 
-	infoCtx, cancel := context.WithTimeout(ctx, messagePicInfoTimeout)
+	userInfoCtx, cancel := context.WithTimeout(ctx, messagePicInfoTimeout)
 	defer cancel()
 
-	userInfoByJID, err := client.GetUserInfo(infoCtx, []types.JID{jid})
+	userInfoByJID, err := client.GetUserInfo(userInfoCtx, []types.JID{jid})
 	if err != nil {
 		zap.L().Warn("failed to get user info for profile pic enrichment", zap.String("id", id), zap.String("jid", jid.String()), zap.Error(err))
 		return "", ""
@@ -1251,7 +1251,7 @@ func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid typ
 	return url, pictureID
 }
 
-func (s *Whatsmiau) invalidatePicCache(jid types.JID) {
+func (s *Whatsmiau) invalidateProfilePicCache(jid types.JID) {
 	if jid.IsEmpty() {
 		return
 	}
