@@ -992,7 +992,7 @@ func (s *Whatsmiau) cleanupProfilePicCache(now time.Time) {
 		fetchedAt time.Time
 	}
 
-	items := make([]cacheItem, 0)
+	items := make([]cacheItem, 0, picCacheMaxEntries)
 	s.picCache.Range(func(key, value any) bool {
 		cacheKey, ok := key.(string)
 		if !ok {
