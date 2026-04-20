@@ -173,6 +173,31 @@ The application can send webhook events for the following actions:
 | `MESSAGES_DELETE` | Triggered when a message is deleted for everyone.   |
 | `CONTACTS_UPSERT` | Triggered when a contact is created or updated.     |
 
+### `MESSAGES_UPSERT` profile picture enrichment
+
+`MESSAGES_UPSERT` now includes the participant profile picture metadata in message payloads:
+
+- `profilePicUrl`: profile picture URL (when available).
+- `pictureId`: stable identifier of the current profile picture (changes when the picture changes).
+
+Behavior:
+
+- Enabled by default (`webhook.includeProfilePicOnMessage = true` when omitted).
+- Uses in-memory cache (`pictureId`-first strategy) to avoid fetching and uploading profile pictures on every message.
+- Cache TTL is 6 hours for entries with URL and 30 minutes for empty entries.
+- On `events.Picture`, cache is invalidated so the next message refreshes the profile picture.
+- If enrichment fails (timeout/privacy/rate-limit/etc.), message delivery continues normally without these fields.
+
+To disable this behavior per instance, set:
+
+```json
+{
+  "webhook": {
+    "includeProfilePicOnMessage": false
+  }
+}
+```
+
 
 ## Contributors
 

@@ -24,10 +24,11 @@ type InstanceProxy struct {
 }
 
 type InstanceWebhook struct {
-	Enabled  *bool             `json:"enabled,omitempty"`
-	Url      string            `json:"url,omitempty"`
-	ByEvents *bool             `json:"byEvents,omitempty"`
-	Base64   *bool             `json:"base64,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty"`
-	Events   []string          `json:"events,omitempty"`
+	Enabled                    *bool             `json:"enabled,omitempty"`
+	Url                        string            `json:"url,omitempty"`
+	ByEvents                   *bool             `json:"byEvents,omitempty"`
+	Base64                     *bool             `json:"base64,omitempty"`
+	IncludeProfilePicOnMessage *bool             `json:"includeProfilePicOnMessage,omitempty"`
+	Headers                    map[string]string `json:"headers,omitempty"`
+	Events                     []string          `json:"events,omitempty"`
 }
