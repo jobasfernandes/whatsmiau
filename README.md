@@ -189,6 +189,7 @@ To avoid expensive picture fetches on every message, WhatsMiau uses an in-memory
 Default TTLs:
 - 6 hours for entries with picture URL.
 - 30 minutes for empty entries.
+- cache is bounded to 10,000 JIDs per instance process, with periodic lazy cleanup.
 
 You can disable this enrichment per instance webhook config with:
 

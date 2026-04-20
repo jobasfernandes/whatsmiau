@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,10 @@ const (
 	picEmptyCacheTTL = 30 * time.Minute
 	// profilePicInfoTimeout bounds GetUserInfo latency during message enrichment.
 	profilePicInfoTimeout = 5 * time.Second
+	// picCacheMaxEntries avoids unbounded RAM growth in high-cardinality traffic.
+	picCacheMaxEntries = 10000
+	// picCacheCleanupInterval throttles expensive cache scans.
+	picCacheCleanupInterval = 2 * time.Minute
 )
 
 func (s *Whatsmiau) getInstance(id string) *models.Instance {
@@ -961,6 +966,68 @@ func (s *Whatsmiau) invalidateProfilePicCache(jid types.JID) {
 	s.picCache.Delete(jid.ToNonAD().String())
 }
 
+func (s *Whatsmiau) storeProfilePicCache(cacheKey string, entry picCacheEntry, now time.Time) {
+	s.picCache.Store(cacheKey, entry)
+	s.cleanupProfilePicCache(now)
+}
+
+func (s *Whatsmiau) cleanupProfilePicCache(now time.Time) {
+	lastRun := time.Unix(0, s.picCacheLastRun.Load())
+	if !lastRun.IsZero() && now.Sub(lastRun) < picCacheCleanupInterval {
+		return
+	}
+
+	if !s.picCacheCleaning.CompareAndSwap(false, true) {
+		return
+	}
+	defer s.picCacheCleaning.Store(false)
+
+	lastRun = time.Unix(0, s.picCacheLastRun.Load())
+	if !lastRun.IsZero() && now.Sub(lastRun) < picCacheCleanupInterval {
+		return
+	}
+
+	type cacheItem struct {
+		key       string
+		fetchedAt time.Time
+	}
+
+	items := make([]cacheItem, 0)
+	s.picCache.Range(func(key, value any) bool {
+		cacheKey, ok := key.(string)
+		if !ok {
+			return true
+		}
+
+		entry, ok := value.(picCacheEntry)
+		if !ok {
+			s.picCache.Delete(cacheKey)
+			return true
+		}
+
+		if isPicCacheExpired(entry, now) {
+			s.picCache.Delete(cacheKey)
+			return true
+		}
+
+		items = append(items, cacheItem{key: cacheKey, fetchedAt: entry.fetchedAt})
+		return true
+	})
+
+	if len(items) > picCacheMaxEntries {
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].fetchedAt.Before(items[j].fetchedAt)
+		})
+
+		excess := len(items) - picCacheMaxEntries
+		for i := 0; i < excess; i++ {
+			s.picCache.Delete(items[i].key)
+		}
+	}
+
+	s.picCacheLastRun.Store(now.UnixNano())
+}
+
 func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid types.JID) (string, string) {
 	if jid.IsEmpty() {
 		return "", ""
@@ -999,11 +1066,11 @@ func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid typ
 	}
 
 	if pictureID == "" {
-		s.picCache.Store(cacheKey, picCacheEntry{
+		s.storeProfilePicCache(cacheKey, picCacheEntry{
 			pictureID: "",
 			url:       "",
 			fetchedAt: now,
-		})
+		}, now)
 		return "", ""
 	}
 
@@ -1021,11 +1088,11 @@ func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid typ
 		}
 	}
 
-	s.picCache.Store(cacheKey, picCacheEntry{
+	s.storeProfilePicCache(cacheKey, picCacheEntry{
 		pictureID: pictureID,
 		url:       url,
 		fetchedAt: now,
-	})
+	}, now)
 
 	return url, pictureID
 }
