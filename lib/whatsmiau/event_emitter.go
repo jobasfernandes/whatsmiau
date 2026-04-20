@@ -37,8 +37,9 @@ type picCacheEntry struct {
 }
 
 const (
-	picCacheTTL      = 6 * time.Hour
-	picEmptyCacheTTL = 30 * time.Minute
+	picCacheTTL           = 6 * time.Hour
+	picEmptyCacheTTL      = 30 * time.Minute
+	profilePicInfoTimeout = 5 * time.Second
 )
 
 func (s *Whatsmiau) getInstance(id string) *models.Instance {
@@ -972,7 +973,7 @@ func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid typ
 	}
 
 	cacheKey := jid.ToNonAD().String()
-	infoCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	infoCtx, cancel := context.WithTimeout(ctx, profilePicInfoTimeout)
 	defer cancel()
 
 	userInfoMap, err := client.GetUserInfo(infoCtx, []types.JID{jid})
