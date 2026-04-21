@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,23 +30,9 @@ type emitter struct {
 	data any
 }
 
-type picCacheEntry struct {
-	pictureID string
-	url       string
-	fetchedAt time.Time
-}
-
 const (
-	// picCacheTTL is used for cached entries that already have a profile picture URL.
-	picCacheTTL = 6 * time.Hour
-	// picEmptyCacheTTL is used for contacts without a profile picture URL.
-	picEmptyCacheTTL = 30 * time.Minute
 	// profilePicInfoTimeout bounds GetUserInfo latency during message enrichment.
 	profilePicInfoTimeout = 5 * time.Second
-	// picCacheMaxEntries avoids unbounded RAM growth in high-cardinality traffic.
-	picCacheMaxEntries = 10000
-	// picCacheCleanupInterval throttles expensive cache scans.
-	picCacheCleanupInterval = 2 * time.Minute
 )
 
 func (s *Whatsmiau) getInstance(id string) *models.Instance {
@@ -441,8 +426,6 @@ func (s *Whatsmiau) handleContactEvent(id string, instance *models.Instance, e *
 }
 
 func (s *Whatsmiau) handlePictureEvent(id string, instance *models.Instance, e *events.Picture, eventMap map[string]bool) {
-	s.invalidateProfilePicCache(e.JID)
-
 	if !eventMap["CONTACTS_UPSERT"] {
 		return
 	}
@@ -796,20 +779,12 @@ func (s *Whatsmiau) convertContactHistorySync(id string, event []*waHistorySync.
 			continue
 		}
 
-		url, b64Pic, err := s.getPic(id, jid)
+		url, _, err := s.getPic(id, jid)
 		if err != nil {
-			zap.L().Error("failed to get pic", zap.Error(err))
-		}
-
-		picUrl, err := s.uploadPic(context.Background(), jid.ToNonAD().String(), b64Pic)
-		if err != nil {
-			zap.L().Error("failed to upload pic", zap.Error(err))
-		} else {
-			url = picUrl
+			zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 		}
 
 		c.ProfilePicUrl = url
-		c.Base64Pic = b64Pic
 		result = append(result, c)
 	}
 
@@ -962,72 +937,6 @@ func (s *Whatsmiau) shouldIncludeProfilePicOnMessage(instance *models.Instance) 
 	return *instance.Webhook.IncludeProfilePicOnMessage
 }
 
-func (s *Whatsmiau) invalidateProfilePicCache(jid types.JID) {
-	s.picCache.Delete(jid.ToNonAD().String())
-}
-
-func (s *Whatsmiau) storeProfilePicCache(cacheKey string, entry picCacheEntry, now time.Time) {
-	s.picCache.Store(cacheKey, entry)
-	s.cleanupProfilePicCache(now)
-}
-
-func (s *Whatsmiau) cleanupProfilePicCache(now time.Time) {
-	lastRun := time.Unix(0, s.picCacheLastRun.Load())
-	if !lastRun.IsZero() && now.Sub(lastRun) < picCacheCleanupInterval {
-		return
-	}
-
-	if !s.picCacheCleaning.CompareAndSwap(false, true) {
-		return
-	}
-	defer s.picCacheCleaning.Store(false)
-
-	lastRun = time.Unix(0, s.picCacheLastRun.Load())
-	if !lastRun.IsZero() && now.Sub(lastRun) < picCacheCleanupInterval {
-		return
-	}
-
-	type cacheItem struct {
-		key       string
-		fetchedAt time.Time
-	}
-
-	items := make([]cacheItem, 0, picCacheMaxEntries)
-	s.picCache.Range(func(key, value any) bool {
-		cacheKey, ok := key.(string)
-		if !ok {
-			return true
-		}
-
-		entry, ok := value.(picCacheEntry)
-		if !ok {
-			s.picCache.Delete(cacheKey)
-			return true
-		}
-
-		if isPicCacheExpired(entry, now) {
-			s.picCache.Delete(cacheKey)
-			return true
-		}
-
-		items = append(items, cacheItem{key: cacheKey, fetchedAt: entry.fetchedAt})
-		return true
-	})
-
-	if len(items) > picCacheMaxEntries {
-		sort.Slice(items, func(i, j int) bool {
-			return items[i].fetchedAt.Before(items[j].fetchedAt)
-		})
-
-		excess := len(items) - picCacheMaxEntries
-		for i := 0; i < excess; i++ {
-			s.picCache.Delete(items[i].key)
-		}
-	}
-
-	s.picCacheLastRun.Store(now.UnixNano())
-}
-
 func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid types.JID) (string, string) {
 	if jid.IsEmpty() {
 		return "", ""
@@ -1057,53 +966,19 @@ func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid typ
 		return "", ""
 	}
 
-	now := time.Now()
 	pictureID := strings.TrimSpace(userInfo.PictureID)
-	if entryRaw, ok := s.picCache.Load(cacheKey); ok {
-		if entry, ok := entryRaw.(picCacheEntry); ok && entry.pictureID == pictureID && !isPicCacheExpired(entry, now) {
-			return entry.url, pictureID
-		}
-	}
-
 	if pictureID == "" {
-		s.storeProfilePicCache(cacheKey, picCacheEntry{
-			pictureID: "",
-			url:       "",
-			fetchedAt: now,
-		}, now)
 		return "", ""
 	}
 
-	url, b64Pic, err := s.getPic(id, jid)
+	// Get WhatsApp's native CDN URL directly
+	url, _, err := s.getPic(id, jid)
 	if err != nil {
-		zap.L().Warn("failed to refresh profile picture", zap.String("instance", id), zap.String("jid", cacheKey), zap.Error(err))
+		zap.L().Warn("failed to get profile picture URL", zap.String("instance", id), zap.String("jid", cacheKey), zap.Error(err))
+		return "", pictureID
 	}
-
-	if b64Pic != "" {
-		picURL, uploadErr := s.uploadPic(ctx, cacheKey, b64Pic)
-		if uploadErr != nil {
-			zap.L().Warn("failed to upload refreshed profile picture", zap.String("instance", id), zap.String("jid", cacheKey), zap.Error(uploadErr))
-		} else if picURL != "" {
-			url = picURL
-		}
-	}
-
-	s.storeProfilePicCache(cacheKey, picCacheEntry{
-		pictureID: pictureID,
-		url:       url,
-		fetchedAt: now,
-	}, now)
 
 	return url, pictureID
-}
-
-func isPicCacheExpired(entry picCacheEntry, now time.Time) bool {
-	ttl := picCacheTTL
-	if entry.url == "" {
-		ttl = picEmptyCacheTTL
-	}
-
-	return now.Sub(entry.fetchedAt) > ttl
 }
 
 func (s *Whatsmiau) convertEventReceipt(id string, evt *events.Receipt) []WookMessageUpdateData {
@@ -1182,31 +1057,10 @@ func (s *Whatsmiau) uploadMessageFile(ctx context.Context, instance *models.Inst
 	return urlResult, b64Result
 }
 
-func (s *Whatsmiau) uploadPic(ctx context.Context, waId, b64Data string) (string, error) {
-	if s.fileStorage == nil {
-		return "", nil
-	}
-
-	mimetype, ext, _, err := extractFromBase64(b64Data)
-	if err != nil {
-		return "", err
-	}
-
-	waIdTreated := strings.Split(waId, "@")
-
-	urlResult, err := s.fileStorage.UploadBase64IfDontExists(ctx, waIdTreated[0]+"."+ext, mimetype, b64Data)
-	if err != nil {
-		zap.L().Error("failed to upload image", zap.Error(err))
-		return "", err
-	}
-
-	return urlResult, nil
-}
-
 func (s *Whatsmiau) convertContact(id string, evt *events.Contact) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID)
 	if err != nil {
-		zap.L().Error("failed to get pic", zap.Error(err))
+		zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 	}
 
 	name := evt.Action.GetFirstName()
@@ -1224,13 +1078,6 @@ func (s *Whatsmiau) convertContact(id string, evt *events.Contact) *WookContact 
 		return nil
 	}
 
-	picUrl, err := s.uploadPic(context.Background(), evt.JID.ToNonAD().String(), b64Pic)
-	if err != nil {
-		zap.L().Error("failed to upload pic", zap.Error(err))
-	} else {
-		url = picUrl
-	}
-
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
 	return &WookContact{
 		RemoteJid:     jid,
@@ -1238,14 +1085,13 @@ func (s *Whatsmiau) convertContact(id string, evt *events.Contact) *WookContact 
 		PushName:      name,
 		ProfilePicUrl: url,
 		InstanceId:    id,
-		Base64Pic:     b64Pic,
 	}
 }
 
 func (s *Whatsmiau) convertGroupInfo(id string, evt *events.GroupInfo) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID)
 	if err != nil {
-		zap.L().Error("failed to get pic", zap.Error(err))
+		zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 	}
 
 	if evt.Name == nil || len(evt.Name.Name) == 0 {
@@ -1256,13 +1102,6 @@ func (s *Whatsmiau) convertGroupInfo(id string, evt *events.GroupInfo) *WookCont
 		return nil
 	}
 
-	picUrl, err := s.uploadPic(context.Background(), evt.JID.ToNonAD().String(), b64Pic)
-	if err != nil {
-		zap.L().Error("failed to upload pic", zap.Error(err))
-	} else {
-		url = picUrl
-	}
-
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
 
 	return &WookContact{
@@ -1271,14 +1110,13 @@ func (s *Whatsmiau) convertGroupInfo(id string, evt *events.GroupInfo) *WookCont
 		ProfilePicUrl: url,
 		InstanceId:    id,
 		RemoteLid:     lid,
-		Base64Pic:     b64Pic,
 	}
 }
 
 func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID)
 	if err != nil {
-		zap.L().Error("failed to get pic", zap.Error(err))
+		zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 	}
 
 	name := evt.NewPushName
@@ -1294,13 +1132,6 @@ func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContac
 		return nil
 	}
 
-	picUrl, err := s.uploadPic(context.Background(), evt.JID.ToNonAD().String(), b64Pic)
-	if err != nil {
-		zap.L().Error("failed to upload pic", zap.Error(err))
-	} else {
-		url = picUrl
-	}
-
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
 
 	return &WookContact{
@@ -1309,27 +1140,17 @@ func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContac
 		InstanceId:    id,
 		ProfilePicUrl: url,
 		RemoteLid:     lid,
-		Base64Pic:     b64Pic,
 	}
 }
 
 func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact {
-	s.invalidateProfilePicCache(evt.JID)
-
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID)
 	if err != nil {
-		zap.L().Error("failed to get pic", zap.Error(err))
+		zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 	}
 
 	if len(url) <= 0 {
 		return nil
-	}
-
-	picUrl, err := s.uploadPic(context.Background(), evt.JID.ToNonAD().String(), b64Pic)
-	if err != nil {
-		zap.L().Error("failed to upload pic", zap.Error(err))
-	} else {
-		url = picUrl
 	}
 
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
@@ -1337,16 +1158,15 @@ func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact 
 	return &WookContact{
 		RemoteJid:     jid,
 		InstanceId:    id,
-		Base64Pic:     b64Pic,
 		ProfilePicUrl: url,
 		RemoteLid:     lid,
 	}
 }
 
 func (s *Whatsmiau) convertBusinessName(id string, evt *events.BusinessName) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID)
 	if err != nil {
-		zap.L().Error("failed to get pic", zap.Error(err))
+		zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 	}
 
 	name := evt.NewBusinessName
@@ -1364,19 +1184,11 @@ func (s *Whatsmiau) convertBusinessName(id string, evt *events.BusinessName) *Wo
 		return nil
 	}
 
-	picUrl, err := s.uploadPic(context.Background(), evt.JID.ToNonAD().String(), b64Pic)
-	if err != nil {
-		zap.L().Error("failed to upload pic", zap.Error(err))
-	} else {
-		url = picUrl
-	}
-
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
 
 	return &WookContact{
 		RemoteJid:     jid,
 		InstanceId:    id,
-		Base64Pic:     b64Pic,
 		ProfilePicUrl: url,
 		PushName:      name,
 		RemoteLid:     lid,
@@ -1402,17 +1214,6 @@ func (s *Whatsmiau) getPic(id string, jid types.JID) (string, string, error) {
 		return "", "", err
 	}
 
-	res, err := s.httpClient.Get(pic.URL)
-	if err != nil {
-		zap.L().Error("get profile picture error", zap.String("id", id), zap.Error(err))
-		return "", "", err
-	}
-
-	picRaw, err := io.ReadAll(res.Body)
-	if err != nil {
-		zap.L().Error("get profile picture error", zap.String("id", id), zap.Error(err))
-		return "", "", err
-	}
-
-	return pic.URL, base64.StdEncoding.EncodeToString(picRaw), nil
+	// Return WhatsApp's native CDN URL directly (no download/re-upload)
+	return pic.URL, "", nil
 }

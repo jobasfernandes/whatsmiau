@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -36,9 +35,6 @@ type Whatsmiau struct {
 	httpClient       *http.Client
 	fileStorage      interfaces.Storage
 	handlerSemaphore chan struct{}
-	picCache         sync.Map
-	picCacheCleaning atomic.Bool
-	picCacheLastRun  atomic.Int64
 }
 
 var instance *Whatsmiau

@@ -276,7 +276,6 @@ type WookContact struct {
 	PushName      string `json:"pushName,omitempty"`
 	ProfilePicUrl string `json:"profilePicUrl,omitempty"`
 	InstanceId    string `json:"instanceId,omitempty"`
-	Base64Pic     string `json:"base64Pic,omitempty"`
 }
 
 type WookContactUpsertData []WookContact

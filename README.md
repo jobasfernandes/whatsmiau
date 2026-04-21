@@ -177,19 +177,13 @@ The application can send webhook events for the following actions:
 
 `MESSAGES_UPSERT` now includes the sender profile picture metadata when available:
 
-- `profilePicUrl`: uploaded URL of the participant profile picture.
+- `profilePicUrl`: WhatsApp's native CDN URL for the participant profile picture (e.g., `https://pps.whatsapp.net/...`).
 - `pictureId`: WhatsApp picture identifier (`types.UserInfo.PictureID`) that changes when the contact changes their photo.
 
-To avoid expensive picture fetches on every message, WhatsMiau uses an in-memory cache keyed by participant JID:
-
-- `pictureId` unchanged + cache still valid: reuse cached `profilePicUrl`.
-- cache miss / changed `pictureId` / expired TTL: refresh picture and update cache.
-- no picture available: cache empty entry with shorter TTL.
-
-Default TTLs:
-- 6 hours for entries with picture URL.
-- 30 minutes for empty entries.
-- cache is bounded to 10,000 JIDs per instance process, with periodic lazy cleanup.
+The URL returned is WhatsApp's direct CDN link, eliminating the need for re-uploading or caching profile pictures. This approach:
+- Reduces memory usage (no caching required)
+- Reduces latency (no download/upload overhead)
+- Simplifies the architecture
 
 You can disable this enrichment per instance webhook config with:
 
