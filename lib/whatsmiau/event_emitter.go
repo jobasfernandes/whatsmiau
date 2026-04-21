@@ -30,6 +30,11 @@ type emitter struct {
 	data any
 }
 
+const (
+	// profilePicInfoTimeout bounds GetUserInfo latency during message enrichment.
+	profilePicInfoTimeout = 5 * time.Second
+)
+
 func (s *Whatsmiau) getInstance(id string) *models.Instance {
 	ctx, c := context.WithTimeout(context.Background(), time.Second*5)
 	defer c()
@@ -774,20 +779,12 @@ func (s *Whatsmiau) convertContactHistorySync(id string, event []*waHistorySync.
 			continue
 		}
 
-		url, b64Pic, err := s.getPic(id, jid)
+		url, _, err := s.getPic(id, jid)
 		if err != nil {
-			zap.L().Error("failed to get pic", zap.Error(err))
-		}
-
-		picUrl, err := s.uploadPic(context.Background(), jid.ToNonAD().String(), b64Pic)
-		if err != nil {
-			zap.L().Error("failed to upload pic", zap.Error(err))
-		} else {
-			url = picUrl
+			zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 		}
 
 		c.ProfilePicUrl = url
-		c.Base64Pic = b64Pic
 		result = append(result, c)
 	}
 
@@ -907,9 +904,21 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 		}
 	}
 
+	var profilePicURL string
+	var pictureID string
+	if s.shouldIncludeProfilePicOnMessage(instance) {
+		enrichJID := e.Info.Sender.ToNonAD()
+		if parsedSenderJID, err := types.ParseJID(senderJid); err == nil {
+			enrichJID = parsedSenderJID.ToNonAD()
+		}
+		profilePicURL, pictureID = s.enrichWithProfilePic(ctx, id, enrichJID)
+	}
+
 	return &WookMessageData{
 		Key:              key,
 		PushName:         strings.TrimSpace(e.Info.PushName),
+		ProfilePicUrl:    profilePicURL,
+		PictureId:        pictureID,
 		Status:           status,
 		Message:          raw,
 		ContextInfo:      &messageContext,
@@ -918,6 +927,58 @@ func (s *Whatsmiau) convertEventMessage(id string, instance *models.Instance, ev
 		InstanceId:       id,
 		Source:           "whatsapp",
 	}
+}
+
+func (s *Whatsmiau) shouldIncludeProfilePicOnMessage(instance *models.Instance) bool {
+	if instance == nil || instance.Webhook.IncludeProfilePicOnMessage == nil {
+		return true
+	}
+
+	return *instance.Webhook.IncludeProfilePicOnMessage
+}
+
+func (s *Whatsmiau) enrichWithProfilePic(ctx context.Context, id string, jid types.JID) (string, string) {
+	if jid.IsEmpty() {
+		return "", ""
+	}
+
+	if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer {
+		return "", ""
+	}
+
+	client, ok := s.clients.Load(id)
+	if !ok || client == nil {
+		return "", ""
+	}
+
+	cacheKey := jid.ToNonAD().String()
+	infoCtx, cancel := context.WithTimeout(ctx, profilePicInfoTimeout)
+	defer cancel()
+
+	userInfoMap, err := client.GetUserInfo(infoCtx, []types.JID{jid})
+	if err != nil {
+		zap.L().Warn("failed to get user info for picture enrichment", zap.String("instance", id), zap.String("jid", cacheKey), zap.Error(err))
+		return "", ""
+	}
+
+	userInfo, ok := userInfoMap[jid]
+	if !ok {
+		return "", ""
+	}
+
+	pictureID := strings.TrimSpace(userInfo.PictureID)
+	if pictureID == "" {
+		return "", ""
+	}
+
+	// Get WhatsApp's native CDN URL directly
+	url, _, err := s.getPic(id, jid)
+	if err != nil {
+		zap.L().Warn("failed to get profile picture URL", zap.String("instance", id), zap.String("jid", cacheKey), zap.Error(err))
+		return "", pictureID
+	}
+
+	return url, pictureID
 }
 
 func (s *Whatsmiau) convertEventReceipt(id string, evt *events.Receipt) []WookMessageUpdateData {
@@ -996,31 +1057,10 @@ func (s *Whatsmiau) uploadMessageFile(ctx context.Context, instance *models.Inst
 	return urlResult, b64Result
 }
 
-func (s *Whatsmiau) uploadPic(ctx context.Context, waId, b64Data string) (string, error) {
-	if s.fileStorage == nil {
-		return "", nil
-	}
-
-	mimetype, ext, _, err := extractFromBase64(b64Data)
-	if err != nil {
-		return "", err
-	}
-
-	waIdTreated := strings.Split(waId, "@")
-
-	urlResult, err := s.fileStorage.UploadBase64IfDontExists(ctx, waIdTreated[0]+"."+ext, mimetype, b64Data)
-	if err != nil {
-		zap.L().Error("failed to upload image", zap.Error(err))
-		return "", err
-	}
-
-	return urlResult, nil
-}
-
 func (s *Whatsmiau) convertContact(id string, evt *events.Contact) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID)
 	if err != nil {
-		zap.L().Error("failed to get pic", zap.Error(err))
+		zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 	}
 
 	name := evt.Action.GetFirstName()
@@ -1038,13 +1078,6 @@ func (s *Whatsmiau) convertContact(id string, evt *events.Contact) *WookContact 
 		return nil
 	}
 
-	picUrl, err := s.uploadPic(context.Background(), evt.JID.ToNonAD().String(), b64Pic)
-	if err != nil {
-		zap.L().Error("failed to upload pic", zap.Error(err))
-	} else {
-		url = picUrl
-	}
-
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
 	return &WookContact{
 		RemoteJid:     jid,
@@ -1052,14 +1085,13 @@ func (s *Whatsmiau) convertContact(id string, evt *events.Contact) *WookContact 
 		PushName:      name,
 		ProfilePicUrl: url,
 		InstanceId:    id,
-		Base64Pic:     b64Pic,
 	}
 }
 
 func (s *Whatsmiau) convertGroupInfo(id string, evt *events.GroupInfo) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID)
 	if err != nil {
-		zap.L().Error("failed to get pic", zap.Error(err))
+		zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 	}
 
 	if evt.Name == nil || len(evt.Name.Name) == 0 {
@@ -1070,13 +1102,6 @@ func (s *Whatsmiau) convertGroupInfo(id string, evt *events.GroupInfo) *WookCont
 		return nil
 	}
 
-	picUrl, err := s.uploadPic(context.Background(), evt.JID.ToNonAD().String(), b64Pic)
-	if err != nil {
-		zap.L().Error("failed to upload pic", zap.Error(err))
-	} else {
-		url = picUrl
-	}
-
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
 
 	return &WookContact{
@@ -1085,14 +1110,13 @@ func (s *Whatsmiau) convertGroupInfo(id string, evt *events.GroupInfo) *WookCont
 		ProfilePicUrl: url,
 		InstanceId:    id,
 		RemoteLid:     lid,
-		Base64Pic:     b64Pic,
 	}
 }
 
 func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID)
 	if err != nil {
-		zap.L().Error("failed to get pic", zap.Error(err))
+		zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 	}
 
 	name := evt.NewPushName
@@ -1108,13 +1132,6 @@ func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContac
 		return nil
 	}
 
-	picUrl, err := s.uploadPic(context.Background(), evt.JID.ToNonAD().String(), b64Pic)
-	if err != nil {
-		zap.L().Error("failed to upload pic", zap.Error(err))
-	} else {
-		url = picUrl
-	}
-
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
 
 	return &WookContact{
@@ -1123,25 +1140,17 @@ func (s *Whatsmiau) convertPushName(id string, evt *events.PushName) *WookContac
 		InstanceId:    id,
 		ProfilePicUrl: url,
 		RemoteLid:     lid,
-		Base64Pic:     b64Pic,
 	}
 }
 
 func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID)
 	if err != nil {
-		zap.L().Error("failed to get pic", zap.Error(err))
+		zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 	}
 
 	if len(url) <= 0 {
 		return nil
-	}
-
-	picUrl, err := s.uploadPic(context.Background(), evt.JID.ToNonAD().String(), b64Pic)
-	if err != nil {
-		zap.L().Error("failed to upload pic", zap.Error(err))
-	} else {
-		url = picUrl
 	}
 
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
@@ -1149,16 +1158,15 @@ func (s *Whatsmiau) convertPicture(id string, evt *events.Picture) *WookContact 
 	return &WookContact{
 		RemoteJid:     jid,
 		InstanceId:    id,
-		Base64Pic:     b64Pic,
 		ProfilePicUrl: url,
 		RemoteLid:     lid,
 	}
 }
 
 func (s *Whatsmiau) convertBusinessName(id string, evt *events.BusinessName) *WookContact {
-	url, b64Pic, err := s.getPic(id, evt.JID)
+	url, _, err := s.getPic(id, evt.JID)
 	if err != nil {
-		zap.L().Error("failed to get pic", zap.Error(err))
+		zap.L().Warn("failed to get pic", zap.String("id", id), zap.Error(err))
 	}
 
 	name := evt.NewBusinessName
@@ -1176,19 +1184,11 @@ func (s *Whatsmiau) convertBusinessName(id string, evt *events.BusinessName) *Wo
 		return nil
 	}
 
-	picUrl, err := s.uploadPic(context.Background(), evt.JID.ToNonAD().String(), b64Pic)
-	if err != nil {
-		zap.L().Error("failed to upload pic", zap.Error(err))
-	} else {
-		url = picUrl
-	}
-
 	jid, lid := s.GetJidLid(context.Background(), id, evt.JID)
 
 	return &WookContact{
 		RemoteJid:     jid,
 		InstanceId:    id,
-		Base64Pic:     b64Pic,
 		ProfilePicUrl: url,
 		PushName:      name,
 		RemoteLid:     lid,
@@ -1214,17 +1214,6 @@ func (s *Whatsmiau) getPic(id string, jid types.JID) (string, string, error) {
 		return "", "", err
 	}
 
-	res, err := s.httpClient.Get(pic.URL)
-	if err != nil {
-		zap.L().Error("get profile picture error", zap.String("id", id), zap.Error(err))
-		return "", "", err
-	}
-
-	picRaw, err := io.ReadAll(res.Body)
-	if err != nil {
-		zap.L().Error("get profile picture error", zap.String("id", id), zap.Error(err))
-		return "", "", err
-	}
-
-	return pic.URL, base64.StdEncoding.EncodeToString(picRaw), nil
+	// Return WhatsApp's native CDN URL directly (no download/re-upload)
+	return pic.URL, "", nil
 }

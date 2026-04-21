@@ -43,10 +43,11 @@ type MigrationResult struct {
 type UpdateInstanceRequest struct {
 	ID      string `json:"id,omitempty" param:"id" validate:"required" swaggerignore:"true"`
 	Webhook struct {
-		Enabled *bool    `json:"enabled,omitempty"`
-		Base64  bool     `json:"base64,omitempty"`
-		URL     string   `json:"url,omitempty"`
-		Events  []string `json:"events,omitempty"`
+		Enabled                    *bool    `json:"enabled,omitempty"`
+		Base64                     bool     `json:"base64,omitempty"`
+		IncludeProfilePicOnMessage *bool    `json:"includeProfilePicOnMessage,omitempty"`
+		URL                        string   `json:"url,omitempty"`
+		Events                     []string `json:"events,omitempty"`
 	} `json:"webhook,omitempty"`
 	models.InstanceProxy
 }

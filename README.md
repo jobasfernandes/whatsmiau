@@ -173,6 +173,30 @@ The application can send webhook events for the following actions:
 | `MESSAGES_DELETE` | Triggered when a message is deleted for everyone.   |
 | `CONTACTS_UPSERT` | Triggered when a contact is created or updated.     |
 
+### `MESSAGES_UPSERT` profile picture enrichment
+
+`MESSAGES_UPSERT` now includes the sender profile picture metadata when available:
+
+- `profilePicUrl`: WhatsApp's native CDN URL for the participant profile picture (e.g., `https://pps.whatsapp.net/...`).
+- `pictureId`: WhatsApp picture identifier (`types.UserInfo.PictureID`) that changes when the contact changes their photo.
+
+The URL returned is WhatsApp's direct CDN link, eliminating the need for re-uploading or caching profile pictures. This approach:
+- Reduces memory usage (no caching required)
+- Reduces latency (no download/upload overhead)
+- Simplifies the architecture
+
+You can disable this enrichment per instance webhook config with:
+
+```json
+{
+  "webhook": {
+    "includeProfilePicOnMessage": false
+  }
+}
+```
+
+When omitted, `includeProfilePicOnMessage` defaults to `true`.
+
 
 ## Contributors
 
